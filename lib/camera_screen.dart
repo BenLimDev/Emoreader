@@ -20,6 +20,9 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isProcessing = false;
   File? _capturedImage;
   int whichCamera = 0; // 0 for back camera, 1 for front camera
+  Timer? _captureTimer;
+  bool _isStreaming = false;
+  List<Map<String, dynamic>> _emotionHistory = [];
 
   @override
   void initState() {
@@ -65,51 +68,106 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  Future<void> _captureAndAnalyze() async {
+  //Automatically capture and analyze the image
+  Future<void> _startEmotionStream() async {
     if (!_isCameraInitialized || _isProcessing) return;
 
     setState(() {
-      _result = 'Processing...';
-      _isProcessing = true;
+      _isStreaming = true;
+      _result = 'Starting emotion stream...';
+      _emotionHistory.clear();
     });
 
-    try {
-      final image = await _controller!.takePicture();
-      final imageFile = File(image.path);
-      
-      setState(() => _capturedImage = imageFile);
-      
-      final result = await widget.classifier.classifyImage(image.path);
-      
-      setState(() => _result = 'Detected: \n$result');
-    } catch (e) {
-      setState(() => _result = 'Error: ${e.toString()}');
-    } finally {
-      setState(() => _isProcessing = false);
-    }
+    _captureTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (!_isStreaming || !mounted) {
+        timer.cancel();
+        return;
+      }
+
+      try {
+        setState(() => _isProcessing = true);
+        final image = await _controller!.takePicture();
+        final result = await widget.classifier.classifyImage(image.path);
+        
+        // Store the emotion history (optional)
+        _emotionHistory.add({
+          'timestamp': DateTime.now(),
+          'emotion': result,
+          'imagePath': image.path
+        });
+
+        // Keep only last 10 entries (adjust as needed)
+        if (_emotionHistory.length > 10) {
+          _emotionHistory.removeAt(0);
+        }
+
+        setState(() => _result = 'Detected: \n$result');
+      } catch (e) {
+        setState(() => _result = 'Error: ${e.toString()}');
+      } finally {
+        if (mounted) {
+          setState(() => _isProcessing = false);
+        }
+      }
+    });
   }
 
-  Future<void> _retakePhoto() async {
+  Future<void> _stopEmotionStream() async {
+    _captureTimer?.cancel();
     setState(() {
-      _capturedImage = null;
-      _result = 'Ready to detect emotions';
+      _isStreaming = false;
+      _result = 'Stream stopped';
     });
   }
 
   @override
   void dispose() {
+    _captureTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }
 
+  //Switch camera function
+  // This function switches between the front and back cameras
   Future<void> _switchCamera() async {
+    if (_isProcessing) return;
+
     setState(() {
-      whichCamera = (whichCamera + 1) % 2; // Toggle between 0 and 1
-      _capturedImage = null;
-      _result = 'Initializing camera...';
-      _isProcessing = false;
+      _isCameraInitialized = false;
+      _result = 'Switching camera...';
     });
-    await _initializeCamera();
+
+    await _controller?.dispose();
+
+    whichCamera = (whichCamera + 1) % 2;
+
+    try {
+      final cameras = await availableCameras();
+      if (whichCamera >= cameras.length) {
+        whichCamera = 0; 
+      }
+
+      _controller = CameraController(
+        cameras[whichCamera],
+        ResolutionPreset.medium,
+      );
+
+      await _controller!.initialize();
+      if (!mounted) return;
+
+      setState(() {
+        _isCameraInitialized = true;
+        _result = 'Ready to detect emotions';
+      });
+    } catch (e) {
+      setState(() {
+        _result = 'Failed to switch camera: ${e.toString()}';
+        _isCameraInitialized = false;
+      });
+      
+      whichCamera = (whichCamera + 1) % 2;
+      await _initializeCamera();
+    }
   }
 
   @override
@@ -162,33 +220,28 @@ class _CameraScreenState extends State<CameraScreen> {
               if (_isCameraInitialized)
                 Column(
                   children: [
-                    if (_capturedImage == null)
                       Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                         children: [
+                          //Switch camera button
                           ElevatedButton(
                             onPressed: _isProcessing ? null : _switchCamera,
                             child: const Text('Switch Camera'),
                           ),
-                          ElevatedButton(
-                            onPressed: _isProcessing ? null : _captureAndAnalyze,
-                            child: const Text('Capture'),
-                          )
+
+                          const SizedBox(width: 10),
+
+                          //Stream button
+                          _isStreaming
+                            ? ElevatedButton(
+                                onPressed: _stopEmotionStream,
+                                child: const Text('Stop Stream'),
+                              )
+                            : ElevatedButton(
+                                onPressed: _startEmotionStream,
+                                child: const Text('Start Stream'),
+                              ),
                         ]
-                      )
-                    else
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          ElevatedButton(
-                            onPressed: _retakePhoto,
-                            child: const Text('Retake'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.grey[300],
-                              foregroundColor: Colors.black,
-                            ),
-                          ),
-                        ],
                       ),
                     const SizedBox(height: 10),
                     ElevatedButton(
@@ -200,11 +253,6 @@ class _CameraScreenState extends State<CameraScreen> {
                       ),
                     ),
                   ],
-                ),
-              if (_isProcessing)
-                const Padding(
-                  padding: EdgeInsets.only(top: 20),
-                  child: CircularProgressIndicator(),
                 ),
             ],
           ),
